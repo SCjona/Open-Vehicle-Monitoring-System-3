@@ -125,6 +125,13 @@ BO_ 391 GearSelector: 8 GearModule
 BO_ 1716 VIN_Broadcast: 8 Gateway
  SG_ VIN_FrameIndex : 0|8@1+ (1,0) [0|2] "" OVMS
 
+// Terminal/ignition status (0x65D). d[3] high nibble is the terminal state:
+// 0x10 = ignition (KL_15), 0x20 = accessory (KL_S; radio, ignition off),
+// 0x00 = off/transition. Ignition feeds ms_v_env_on.
+BO_ 1629 TerminalStatus: 8 GearModule
+ SG_ Kl15_Ignition : 28|1@1+ (1,0) [0|1] "" OVMS
+ SG_ KlS_Accessory : 29|1@1+ (1,0) [0|1] "" OVMS
+
 // ---------------------------------------------------------------------------
 // BAP extended frames on KCAN (29-bit IDs, node 0x25 = clima ECU)
 // These are multi-frame BAP messages, not conventional CAN signals.

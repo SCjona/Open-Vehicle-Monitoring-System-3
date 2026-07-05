@@ -622,17 +622,19 @@ void OvmsVehicleVWeGolf::IncomingFrameCan3(CAN_frame_t* p_frame) {
             ESP_LOGV(TAG, "0x06B7 outside=%.1f°C", tmp_f32);
             break;
         }
-        case 0x3C0:  // clamp status received
+        case 0x65D:  // Terminal / ignition status.
         {
-            // the following are from d[2]
-            // KL_S Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // KL_15 Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // KL_X Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // KL_50 Startanforderung Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // Remotestart Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // KL_Infotainment Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // Remotestart_KL15_Anf Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
-            // Remotestart_Motor_Start Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // The terminal state lives in d[3]'s high nibble:
+            //   0x10 = IGNITION ON (KL_15)     -> ms_v_env_on
+            //   0x20 = accessory only (KL_S; e.g. radio on, ignition off)
+            //   0x00 = off / brief transition
+            // These are mutually exclusive, so masking 0x10 cleanly isolates
+            // ignition (accessory 0x20 does NOT set env_on). The 0x3C0 clamp-status
+            // frame one might expect here reads all-zero on this vehicle.
+            // (d[0]=CRC, d[1]=counter, d[2] and d[7] appear constant.)
+            const bool ign_on = (d[3] & 0x10) != 0;  // KL_15
+            StandardMetrics.ms_v_env_on->SetValue(ign_on);
+            ESP_LOGV(TAG, "0x65D d3=%02x ign_on=%u acc=%u", d[3], ign_on, (d[3] & 0x20) >> 5);
             break;
         }
         default: {
@@ -659,6 +661,17 @@ void OvmsVehicleVWeGolf::Ticker1(uint32_t ticker) {
 
     if (m_last_message_received < 254) m_last_message_received++;
     ESP_LOGV(TAG, "0x5A7 last_msg=%u", m_last_message_received);
+
+    // ms_v_env_awake = "bus is alive / car switched on by user". This is exactly
+    // m_is_car_online (a message seen within the last 10 s). ms_v_env_on (ignition
+    // "drivable" state) is a DIFFERENT thing and is set from the terminal/ignition
+    // status frame in IncomingFrameCan3 — do NOT derive it from awake or gear.
+    StandardMetrics.ms_v_env_awake->SetValue(m_is_car_online);
+    if (!m_is_car_online) {
+        // Bus dead => ignition is necessarily off; clear the drivable state so a
+        // stale ignition-on reading can't leave the car stuck "on" after sleep.
+        StandardMetrics.ms_v_env_on->SetValue(false);
+    }
 
     if (m_is_control_active &&
         m_is_car_online)  // after wakeup the other ECUs waiting for the car to be online before we
