@@ -41,6 +41,11 @@
 #define VWEGOLF_CHARGING 2  // Base systems online & car is charging the main battery
 #define VWEGOLF_ON 3        // All systems online & car is drivable
 
+// Seconds to keep the OCU heartbeat (0x5A7) alive after a wakeup/command before
+// auto-releasing it — "deliver and release", so we don't sit on the bus or need a
+// manual `xvg offline`. A still-queued command re-arms the window until delivered.
+#define VWEGOLF_OCU_HOLD_SECS 15
+
 class OvmsVehicleVWeGolf : public OvmsVehicle {
  public:
     OvmsVehicleVWeGolf();
@@ -56,7 +61,9 @@ class OvmsVehicleVWeGolf : public OvmsVehicle {
     vehicle_command_t CommandLock(const char* pin) override;
     vehicle_command_t CommandUnlock(const char* pin) override;
     vehicle_command_t CommandWakeup() override;
+    vehicle_command_t CommandClimateControl(bool enable) override;
     void SendOcuHeartbeat();
+    void SendClimateControl(bool enable);
 
  protected:
     void Ticker1(uint32_t ticker) override;
@@ -67,6 +74,8 @@ class OvmsVehicleVWeGolf : public OvmsVehicle {
     uint8_t m_last_message_received = 255;
     uint8_t m_climate_control_temp = 19;
     bool m_climate_control_on_battery = false;
+    bool m_climate_start_requested = false;
+    bool m_climate_stop_requested = false;
     bool m_mirror_fold_in_requested = false;
     bool m_horn_requested = false;
     bool m_indicators_requested = false;
@@ -74,6 +83,7 @@ class OvmsVehicleVWeGolf : public OvmsVehicle {
     bool m_unlock_requested = false;
     bool m_lock_requested = false;
     bool m_is_control_active = false;
+    uint8_t m_control_hold = 0;   // Ticker1 countdown; 0 => release the OCU heartbeat
     uint8_t m_vin_parts_received = 0;
     char m_vin_buf[18] = {};
     // Regenerative-braking strength, decoded from 0x187 (see IncomingFrameCan2).

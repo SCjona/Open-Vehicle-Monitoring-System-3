@@ -57,6 +57,9 @@ OvmsVehicleVWeGolf::OvmsVehicleVWeGolf() {
     OvmsCommand* cmd_vweg = MyCommandApp.RegisterCommand("xvg", "VW e-Golf controls");
     cmd_vweg->RegisterCommand("offline", "Stop sending OCU keepalive", [this](...) {
         m_is_control_active = false;
+        m_control_hold = 0;
+        m_climate_start_requested = false;
+        m_climate_stop_requested = false;
         ESP_LOGI(TAG, "OCU keepalive stopped");
     });
     cmd_vweg->RegisterCommand("fold_mirrors", "Fold mirrors in",
@@ -564,17 +567,23 @@ void OvmsVehicleVWeGolf::IncomingFrameCan3(CAN_frame_t* p_frame) {
         }
         case 0x5EA:  // Clima ECU status: cabin temperature and remote mode.
         {
+            // HVAC on = climate is actively conditioning: d[3] bit 3 (0x08).
+            // NOTE: d[3] bits 6-7 mark a remote-climate *session* but read the same
+            // (=2) whether merely armed (d3=0x80) or actually running (d3=0x88), so
+            // keying HVAC on those bits leaves it stuck true after a stop (the BCU
+            // drops 0x88 -> 0x80 when conditioning ends). The conditioning bit (0x08)
+            // clears on stop, so use it. Set unconditionally (before the cabin-temp
+            // sentinel guard) so HVAC always tracks even when temp is the sentinel.
+            StandardMetrics.ms_v_env_hvac->SetValue((d[3] & 0x08) != 0);
+
             // Cabin temperature: 10-bit, factor 0.1°C, offset -40°C.
             // Near-max raw value is a startup sentinel decoding to ~62°C. Discard it.
             tmp_u16 = ((uint16_t)(d[6] & 0xfc) >> 2) | ((uint16_t)(d[7] & 0xf) << 6);
-            if (tmp_u16 >= 0x3FE) break;
-            tmp_f32 = ((float)tmp_u16) * 0.1F - 40.0F;
-
-            // remote_mode: 0=idle, 2=running, 3=just activated. HVAC on when != 0.
-            tmp_u8 = ((uint8_t)(d[3] & 0xc0) >> 6) | ((uint8_t)(d[4] & 0x1) << 2);
-            StandardMetrics.ms_v_env_hvac->SetValue(tmp_u8 != 0);
-            StandardMetrics.ms_v_env_cabintemp->SetValue(tmp_f32);
-            ESP_LOGV(TAG, "0x05EA clima_cabin=%.1f°C remote_mode=%u", tmp_f32, tmp_u8);
+            if (tmp_u16 < 0x3FE) {
+                tmp_f32 = ((float)tmp_u16) * 0.1F - 40.0F;
+                StandardMetrics.ms_v_env_cabintemp->SetValue(tmp_f32);
+            }
+            ESP_LOGV(TAG, "0x05EA hvac=%d d3=%02x", (d[3] & 0x08) != 0, d[3]);
             break;
         }
         case 0x5F5:  // Range estimates from the instrument cluster.
@@ -702,6 +711,9 @@ void OvmsVehicleVWeGolf::Ticker1(uint32_t ticker) {
         // Bus dead => ignition is necessarily off; clear the drivable state so a
         // stale ignition-on reading can't leave the car stuck "on" after sleep.
         StandardMetrics.ms_v_env_on->SetValue(false);
+        // Clima ECU (0x5EA) is silent once the bus sleeps, so it can't refresh HVAC;
+        // clear it so climate doesn't read "on" forever after conditioning ends.
+        StandardMetrics.ms_v_env_hvac->SetValue(false);
     }
 
     if (m_is_control_active &&
@@ -711,6 +723,26 @@ void OvmsVehicleVWeGolf::Ticker1(uint32_t ticker) {
     {
         SendOcuHeartbeat();  // working
         ESP_LOGV(TAG, "Heartbeat sending triggered");
+    }
+
+    // OCU heartbeat auto-teardown ("deliver and release"). CommandWakeup /
+    // CommandClimateControl arm m_control_hold; the window counts down every second
+    // (bounded even if the car never wakes) and then releases the heartbeat — no
+    // manual `xvg offline` needed. SendClimateControl re-arms the window on delivery
+    // so there's a full grace period after the command actually goes out; if the
+    // window expires with a command still queued, the command is dropped. `xvg
+    // offline` still forces it off immediately.
+    if (m_is_control_active) {
+        if (m_control_hold > 0)
+            m_control_hold--;
+        if (m_control_hold == 0) {
+            if (m_climate_start_requested || m_climate_stop_requested)
+                ESP_LOGW(TAG, "OCU hold expired with climate command undelivered — dropping");
+            m_climate_start_requested = false;
+            m_climate_stop_requested = false;
+            m_is_control_active = false;
+            ESP_LOGI(TAG, "OCU hold window expired — releasing heartbeat (control inactive)");
+        }
     }
 }
 
@@ -749,6 +781,23 @@ OvmsVehicle::vehicle_command_t OvmsVehicleVWeGolf::CommandIndicators() {
 
 OvmsVehicle::vehicle_command_t OvmsVehicleVWeGolf::CommandPanic() {
     m_panic_mode_requested = true;
+    return Success;
+}
+
+OvmsVehicle::vehicle_command_t OvmsVehicleVWeGolf::CommandClimateControl(bool enable) {
+    ESP_LOGI(TAG, "CommandClimateControl %s", enable ? "ON" : "OFF");
+    // Queue the request; the BAP frames are actually sent from SendOcuHeartbeat,
+    // which only runs once the comfort bus is awake and the OCU heartbeat is
+    // flowing (m_is_control_active && m_is_car_online). Latest request wins.
+    m_climate_start_requested = enable;
+    m_climate_stop_requested = !enable;
+    // Climate needs the car awake — this deliberately uses the OCU wake/heartbeat
+    // path. If the bus is asleep, wake it; the queued command goes out on the next
+    // heartbeat tick after the car comes online.
+    if (!m_is_car_online)
+        CommandWakeup();
+    m_is_control_active = true;
+    m_control_hold = VWEGOLF_OCU_HOLD_SECS;  // held (re-armed by Ticker1) until the command is delivered
     return Success;
 }
 
@@ -814,6 +863,7 @@ OvmsVehicle::vehicle_command_t OvmsVehicleVWeGolf::CommandWakeup() {
                  data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
 
         m_is_control_active = true;
+        m_control_hold = VWEGOLF_OCU_HOLD_SECS;  // auto-release after the hold window
     } else {
         ESP_LOGI(TAG, "Wakeup not necessary car was online before");
     }
@@ -892,4 +942,72 @@ void OvmsVehicleVWeGolf::SendOcuHeartbeat() {
     ESP_LOGV(TAG, "Heartbeat send ID: data 0->7");
     ESP_LOGI(TAG, "FHeartbeat send ID:0x5A7 data %02x %02x %02x %02x %02x %02x %02x %02x", data[0],
              data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+
+    // Send a queued climate command now that the bus is awake and the heartbeat is
+    // flowing (this only runs while online + control active).
+    if (m_climate_start_requested || m_climate_stop_requested) {
+        bool enable = m_climate_start_requested;
+        m_climate_start_requested = false;
+        m_climate_stop_requested = false;
+        SendClimateControl(enable);
+        m_control_hold = VWEGOLF_OCU_HOLD_SECS;  // full grace after the command is sent
+    }
+}
+
+void OvmsVehicleVWeGolf::SendClimateControl(bool enable) {
+    // Start/stop climate on CAN 0x17332501 (LSG 0x25 BatteryControl), reproducing the
+    // sequence a real controller sends: BAP channel handshake (19 42 / 19 41), then a
+    // profile-arm write on func 0x959, then the actual immediate-start trigger on func
+    // 0x958. The trigger is the frame that starts conditioning — arming alone does
+    // nothing. Called only after the controller has been reset to error-active
+    // (retries on), so frames deliver reliably on the busy comfort bus.
+    //
+    // BAP wire func = 0x940 + propId: func 0x959 = SetBatteryControlProfileList
+    // (propId 0x19, "arm"); func 0x958 = SetBatteryControlImmediately (propId 0x18,
+    // body {profileId, controlFlag}). Header nibble 2 = SET (a status reply from the
+    // BCU would be nibble 4, e.g. 49 58). Selector 0x22 = start, 0x23 = stop.
+    canbus* comfBus = m_can3;
+    uint8_t data[8];
+
+    // BAP channel open handshake.
+    data[0] = 0x19; data[1] = 0x42;
+    comfBus->WriteExtended(0x17332501, 2, data);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    data[0] = 0x19; data[1] = 0x41;
+    comfBus->WriteExtended(0x17332501, 2, data);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Profile-arm, frame 1 (BAP long-message start): 80 08 29 59 <sel> 06 00 01
+    data[0] = 0x80;                  // BAP long-message start; payload length in d[1]
+    data[1] = 0x08;                  // payload length = 8
+    data[2] = 0x29;                  // SET (nibble 2) | func hi
+    data[3] = 0x59;                  // func 0x959 = SetBatteryControlProfileList (arm)
+    data[4] = enable ? 0x22 : 0x23;  // selector: start / stop
+    data[5] = 0x06;
+    data[6] = 0x00;
+    data[7] = 0x01;
+    comfBus->WriteExtended(0x17332501, 8, data);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // Profile-arm, frame 2 (continuation / final): C0 06 00 20 00
+    data[0] = 0xC0;
+    data[1] = 0x06;
+    data[2] = 0x00;
+    data[3] = 0x20;
+    data[4] = 0x00;
+    comfBus->WriteExtended(0x17332501, 5, data);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // Trigger: SetBatteryControlImmediately (func 0x958, propId 0x18), body =
+    // {profileId, controlFlag}. profileId 0 = global/"Optionen" profile (holds the
+    // configured target temp); controlFlag 1 = start now, 0 = stop. This is the frame
+    // that actually starts/stops conditioning.
+    data[0] = 0x29;                  // SET (nibble 2) | func hi
+    data[1] = 0x58;                  // func 0x958 = SetBatteryControlImmediately
+    data[2] = 0x00;                  // profileId 0 = global profile
+    data[3] = enable ? 0x01 : 0x00;  // controlFlag: start / stop
+    comfBus->WriteExtended(0x17332501, 4, data);
+
+    ESP_LOGI(TAG, "Climate %s command sent (0x17332501: arm sel=0x%02x + trigger 29 58 00 %02x)",
+             enable ? "START" : "STOP", enable ? 0x22 : 0x23, enable ? 0x01 : 0x00);
 }
