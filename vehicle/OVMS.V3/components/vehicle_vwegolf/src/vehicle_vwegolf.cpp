@@ -89,23 +89,18 @@ void OvmsVehicleVWeGolf::IncomingFrameCan2(CAN_frame_t* p_frame) {
             if (gear_nibble == 2) {
                 // Park
                 StandardMetrics.ms_v_env_gear->SetValue(0);
-                StandardMetrics.ms_v_env_drivemode->SetValue(0);
             } else if (gear_nibble == 3) {
                 // Reverse
                 StandardMetrics.ms_v_env_gear->SetValue(-1);
-                StandardMetrics.ms_v_env_drivemode->SetValue(0);
             } else if (gear_nibble == 4) {
                 // Neutral
                 StandardMetrics.ms_v_env_gear->SetValue(0);
-                StandardMetrics.ms_v_env_drivemode->SetValue(0);
             } else if (gear_nibble == 5) {
                 // Drive
                 StandardMetrics.ms_v_env_gear->SetValue(1);
-                StandardMetrics.ms_v_env_drivemode->SetValue(0);
             } else if (gear_nibble == 6) {
                 // B mode
                 StandardMetrics.ms_v_env_gear->SetValue(1);
-                StandardMetrics.ms_v_env_drivemode->SetValue(1);
             }
 
             // Regenerative-braking (recuperation) strength. The e-Golf has five
@@ -285,6 +280,28 @@ void OvmsVehicleVWeGolf::IncomingFrameCan3(CAN_frame_t* p_frame) {
                 StandardMetrics.ms_v_pos_longitude->SetValue(lon);
             }
             ESP_LOGV(TAG, "0x0486 lat=%.6f lon=%.6f valid=%d", lat, lon, valid);
+            break;
+        }
+        case 0x386:  // Drive mode (Charisma / Fahrprofilauswahl active profile).
+        {
+            // d[5] = active drive profile: 0x02 = Normal, 0x05 = Eco, 0x08 = Eco+
+            // (matches the MIB CharismaProfiles enum auto_normal=2/efficiency=5/range=8).
+            // Mapped to ms_v_env_drivemode as 0 = Normal, 1 = Eco, 2 = Eco+.
+            switch (d[5]) {
+                case 0x02:
+                    StandardMetrics.ms_v_env_drivemode->SetValue(0);
+                    break;
+                case 0x05:
+                    StandardMetrics.ms_v_env_drivemode->SetValue(1);
+                    break;
+                case 0x08:
+                    StandardMetrics.ms_v_env_drivemode->SetValue(2);
+                    break;
+                default:
+                    // Unknown profile value — leave the last known drive mode.
+                    break;
+            }
+            ESP_LOGV(TAG, "0x0386 drivemode raw=0x%02x", d[5]);
             break;
         }
         case 0x583:  // ZV_02: central locking and door open states.
