@@ -71,6 +71,8 @@ class OvmsVehicleVWeGolf : public OvmsVehicle {
 
  private:
     bool m_is_car_online = true;
+    bool m_kl15_on = false;
+    bool m_drivetrain_ready = false;
     uint8_t m_last_message_received = 255;
     uint8_t m_climate_control_temp = 19;
     bool m_climate_control_on_battery = false;

@@ -128,12 +128,17 @@ BO_ 391 GearSelector: 8 GearModule
 BO_ 1716 VIN_Broadcast: 8 Gateway
  SG_ VIN_FrameIndex : 0|8@1+ (1,0) [0|2] "" OVMS
 
-// Terminal/ignition status (0x65D). d[3] high nibble is the terminal state:
-// 0x10 = ignition (KL_15), 0x20 = accessory (KL_S; radio, ignition off),
-// 0x00 = off/transition. Ignition feeds ms_v_env_on.
-BO_ 1629 TerminalStatus: 8 GearModule
- SG_ Kl15_Ignition : 28|1@1+ (1,0) [0|1] "" OVMS
- SG_ KlS_Accessory : 29|1@1+ (1,0) [0|1] "" OVMS
+// Clamp/terminal status (0x3C0). d[2] carries the terminal bits: KL_S (accessory)
+// and KL_15 (ignition). KL_15 = car awake / switched on by the user -> ms_v_env_awake.
+BO_ 960 ClampStatus: 8 Gateway
+ SG_ KlS_Accessory : 16|1@1+ (1,0) [0|1] "" OVMS
+ SG_ Kl15_Ignition : 17|1@1+ (1,0) [0|1] "" OVMS
+
+// OBD_01 (0x391). d[7] bit 5 = OBD_Driving_Cycle: the drivetrain READY flag, set only
+// when the car is drivable. ms_v_env_on = KL_15 && READY. d[5] = accelerator pedal.
+BO_ 913 OBD_01: 8 Powertrain
+ SG_ OBD_Driving_Cycle : 61|1@1+ (1,0) [0|1] "" OVMS
+ SG_ OBD_Abs_Pedal_Pos : 40|8@1+ (0.392,0) [0|100] "%" OVMS
 
 // ---------------------------------------------------------------------------
 // BAP extended frames on KCAN (29-bit IDs, node 0x25 = clima ECU)

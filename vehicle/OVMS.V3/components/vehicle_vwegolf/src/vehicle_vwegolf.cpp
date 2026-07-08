@@ -673,25 +673,43 @@ void OvmsVehicleVWeGolf::IncomingFrameCan3(CAN_frame_t* p_frame) {
             ESP_LOGV(TAG, "0x06B7 outside=%.1f°C", tmp_f32);
             break;
         }
-        case 0x65D:  // Terminal / ignition status.
+        case 0x391:  // OBD_01: drivetrain READY status
         {
-            // The terminal state lives in d[3]'s high nibble:
-            //   0x10 = IGNITION ON (KL_15)     -> ms_v_env_on
-            //   0x20 = accessory only (KL_S; e.g. radio on, ignition off)
-            //   0x00 = off / brief transition
-            // These are mutually exclusive, so masking 0x10 cleanly isolates
-            // ignition (accessory 0x20 does NOT set env_on). The 0x3C0 clamp-status
-            // frame one might expect here reads all-zero on this vehicle.
-            // (d[0]=CRC, d[1]=counter, d[2] and d[7] appear constant.)
-            const bool ign_on = (d[3] & 0x10) != 0;  // KL_15
-            StandardMetrics.ms_v_env_on->SetValue(ign_on);
+            // d[7] bit 5 is OBD_Driving_Cycle: it goes high only once the drivetrain is fully
+            // up and the car is ready to drive; it stays clear during charging, remote climate
+            // and while the ignition is merely on but not yet READY. The frame keeps
+            // broadcasting after the ignition goes off and the bit stays latched high for
+            // several seconds into the power-down, so it is combined with KL_15 for v.e.on
+            // rather than used on its own. if only ignition is turned on again this bit is cleared.
+            // (d[5] carries the accelerator pedal position, OBD_Abs_Pedal_Pos - not mapped.)
+            m_drivetrain_ready = (d[7] & 0x20) != 0;
+            StandardMetrics.ms_v_env_on->SetValue(m_kl15_on && m_drivetrain_ready);
+            ESP_LOGV(TAG, "0x391 READY=%u", m_drivetrain_ready);
+            break;
+        }
+        case 0x3C0:  // clamp status received
+        {
+            // the following are from d[2]
+            // KL_S Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // KL_15 Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // KL_X Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // KL_50 Startanforderung Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // Remotestart Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // KL_Infotainment Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // Remotestart_KL15_Anf Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // Remotestart_Motor_Start Faktor 1 Offset 0, Minimum 0, Maximum 1 [] Initial 0
+            // KL_15 (terminal 15 = ignition) means the car is awake and switched on by the
+            // user; drivable (v.e.on) additionally requires the drivetrain to report READY.
+            m_kl15_on = (d[2] & 0x02) != 0;
+            StandardMetrics.ms_v_env_awake->SetValue(m_kl15_on);
+            StandardMetrics.ms_v_env_on->SetValue(m_kl15_on && m_drivetrain_ready);
             // Regen level (xvg.v.recup) is a driving concept — clear it to N/A when
             // ignition goes off so it doesn't linger on the last D/B value. The gear
             // frame 0x187 stops once the car is off, so without this the metric would
             // hold stale until its auto-stale timeout.
-            if (!ign_on)
+            if (!m_kl15_on)
                 m_recup_level->SetValue(-1);
-            ESP_LOGV(TAG, "0x65D d3=%02x ign_on=%u acc=%u", d[3], ign_on, (d[3] & 0x20) >> 5);
+            ESP_LOGV(TAG, "0x3C0 KL_15=%u KL_S=%u", m_kl15_on, d[2] & 0x01);
             break;
         }
         default: {
@@ -719,14 +737,13 @@ void OvmsVehicleVWeGolf::Ticker1(uint32_t ticker) {
     if (m_last_message_received < 254) m_last_message_received++;
     ESP_LOGV(TAG, "0x5A7 last_msg=%u", m_last_message_received);
 
-    // ms_v_env_awake = "bus is alive / car switched on by user". This is exactly
-    // m_is_car_online (a message seen within the last 10 s). ms_v_env_on (ignition
-    // "drivable" state) is a DIFFERENT thing and is set from the terminal/ignition
-    // status frame in IncomingFrameCan3 — do NOT derive it from awake or gear.
-    StandardMetrics.ms_v_env_awake->SetValue(m_is_car_online);
+    // awake (KL_15) and drivable (KL_15 && READY) are set from the terminal / READY
+    // frames in IncomingFrameCan3. When the bus goes silent the car is asleep: clear
+    // both as a backstop in case those frames stopped before signalling the transition.
     if (!m_is_car_online) {
-        // Bus dead => ignition is necessarily off; clear the drivable state so a
-        // stale ignition-on reading can't leave the car stuck "on" after sleep.
+        m_kl15_on = false;
+        m_drivetrain_ready = false;
+        StandardMetrics.ms_v_env_awake->SetValue(false);
         StandardMetrics.ms_v_env_on->SetValue(false);
         // Clima ECU (0x5EA) is silent once the bus sleeps, so it can't refresh HVAC;
         // clear it so climate doesn't read "on" forever after conditioning ends.
