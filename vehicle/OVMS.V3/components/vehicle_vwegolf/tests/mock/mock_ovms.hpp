@@ -137,6 +137,7 @@ struct StandardMetricsType {
     OvmsMetricFloat*  ms_v_env_cabintemp        = new OvmsMetricFloat("ms_v_env_cabintemp");
     OvmsMetricFloat*  ms_v_env_cabinsetpoint    = new OvmsMetricFloat("ms_v_env_cabinsetpoint");
     OvmsMetricBool*   ms_v_env_on               = new OvmsMetricBool("ms_v_env_on");
+    OvmsMetricBool*   ms_v_env_awake            = new OvmsMetricBool("ms_v_env_awake");
     OvmsMetricBool*   ms_v_env_locked           = new OvmsMetricBool("ms_v_env_locked");
     OvmsMetricBool*   ms_v_env_hvac             = new OvmsMetricBool("ms_v_env_hvac");
     OvmsMetricInt*    ms_v_env_parktime         = new OvmsMetricInt("ms_v_env_parktime");
@@ -166,6 +167,17 @@ struct StandardMetricsType {
 extern StandardMetricsType StandardMetrics;
 // The source uses both 'StandardMetrics' and 'StdMetrics' — make them the same object.
 #define StdMetrics StandardMetrics
+
+// Metric registry (subset) — InitInt creates a standalone custom metric.
+static constexpr int SM_STALE_MIN = 60;
+struct OvmsMetrics {
+    OvmsMetricInt* InitInt(const char* name, int /*autostale*/ = 0, int value = 0) {
+        auto* m = new OvmsMetricInt(name);
+        m->SetValue(value);
+        return m;
+    }
+};
+extern OvmsMetrics MyMetrics;
 
 // ---------------------------------------------------------------------------
 // Config
