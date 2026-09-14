@@ -11,9 +11,16 @@ endif ()
 idf_build_get_property(prefix __PREFIX)
 target_linker_script("__${prefix}_esp_system" INTERFACE "${COMPONENT_DIR}/ovms_boot.ld")
 
-execute_process(COMMAND git describe --always --tags --dirty
-                OUTPUT_VARIABLE OVMS_VERSION
+# Fork build identity: SCjona-g<short commit>[-dirty] instead of the upstream tag-based describe.
+execute_process(COMMAND git rev-parse --short=9 HEAD
+                OUTPUT_VARIABLE OVMS_GITHASH
                 ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND git diff --quiet HEAD RESULT_VARIABLE OVMS_GITDIRTY)
+if(OVMS_GITDIRTY)
+  set(OVMS_VERSION "SCjona-g${OVMS_GITHASH}-dirty")
+else()
+  set(OVMS_VERSION "SCjona-g${OVMS_GITHASH}")
+endif()
 add_definitions("-DOVMS_VERSION=\"${OVMS_VERSION}\"")
 
 # This is overriding the standard panic handler

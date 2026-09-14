@@ -11,7 +11,8 @@ ifdef CONFIG_SPIRAM_CACHE_WORKAROUND
 COMPONENT_ADD_LDFLAGS += -mfix-esp32-psram-cache-issue
 endif
 
-OVMS_VERSION := $(shell git describe --always --tags --dirty)
+# Fork build identity: SCjona-g<short commit>[-dirty] instead of the upstream tag-based describe.
+OVMS_VERSION := SCjona-g$(shell git rev-parse --short=9 HEAD)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 CPPFLAGS := -D OVMS_VERSION=\"$(OVMS_VERSION)\" $(CPPFLAGS)
 
 # update OVMS_VERSION dependency file:
